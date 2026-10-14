@@ -7,6 +7,8 @@ import subprocess
 import shutil
 from pathlib import Path
 
+import httpx
+from pydantic import BaseModel
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -29,7 +31,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_WHISPER_MODEL = "whisper-large-v3"
 GROQ_LLM_MODEL = "qwen-qwq-32b"
 
-UPLOAD_DIR = Path(tempfile.gettempdir()) / "subtitle_forge"
+UPLOAD_DIR = Path("/opt/render/project/src/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 LANGUAGE_CODE_MAP = {
@@ -39,10 +41,32 @@ LANGUAGE_CODE_MAP = {
 }
 
 
-# ─────────────────────────── ffmpeg helpers ──────────────────────
+# ─────────────────────────── pydantic models ────────────────────
+
+class InitBody(BaseModel):
+    filename: str
+    total_chunks: int
+
+
+class ProcessBody(BaseModel):
+    job_id: str
+    source_language: str
+    target_language: str
+    filename: str
+
+
+# ─────────────────────────── groq client ────────────────────────
+
+def get_groq_client() -> groq.Groq:
+    return groq.Groq(
+        api_key=GROQ_API_KEY,
+        http_client=httpx.Client(),
+    )
+
+
+# ─────────────────────────── ffmpeg helpers ─────────────────────
 
 def extract_audio(video_path: Path, audio_path: Path) -> None:
-    """Extract mono 16 kHz WAV — optimal for Whisper."""
     cmd = [
         "ffmpeg", "-y",
         "-i", str(video_path),
@@ -70,7 +94,6 @@ def get_audio_duration(audio_path: Path) -> float:
 
 
 def split_audio(audio_path: Path, chunk_dir: Path, chunk_seconds: int = 600) -> list[Path]:
-    """Split audio into fixed-length WAV chunks."""
     chunk_dir.mkdir(exist_ok=True)
     pattern = str(chunk_dir / "chunk_%04d.wav")
     cmd = [
@@ -88,7 +111,6 @@ def split_audio(audio_path: Path, chunk_dir: Path, chunk_seconds: int = 600) -> 
 # ─────────────────────────── transcription ──────────────────────
 
 def _groq_transcribe_single(client: groq.Groq, audio_path: Path, lang: str) -> list[dict]:
-    """Transcribe one WAV file via Groq Whisper. File must be < 25 MB."""
     with open(audio_path, "rb") as f:
         response = client.audio.transcriptions.create(
             file=(audio_path.name, f, "audio/wav"),
@@ -97,29 +119,35 @@ def _groq_transcribe_single(client: groq.Groq, audio_path: Path, lang: str) -> l
             response_format="verbose_json",
             timestamp_granularities=["segment"],
         )
-    return [
-        {
-            "start": seg.start,
-            "end": seg.end,
-            "text": seg.text.strip(),
-        }
-        for seg in response.segments
-    ]
+
+    # response.segments can be list of dicts OR objects depending on SDK version
+    # handle both safely
+    segments = []
+    for seg in response.segments:
+        if isinstance(seg, dict):
+            segments.append({
+                "start": seg["start"],
+                "end":   seg["end"],
+                "text":  seg["text"].strip(),
+            })
+        else:
+            segments.append({
+                "start": seg.start,
+                "end":   seg.end,
+                "text":  seg.text.strip(),
+            })
+    return segments
 
 
 def transcribe_with_groq(audio_path: Path, lang: str) -> list[dict]:
-    """
-    Transcribe audio with Groq Whisper.
-    Auto-chunks if file > 24 MB to stay within Groq's 25 MB limit.
-    """
-    client = groq.Groq(api_key=GROQ_API_KEY)
+    client  = get_groq_client()
     size_mb = audio_path.stat().st_size / (1024 * 1024)
 
     if size_mb <= 24:
         return _groq_transcribe_single(client, audio_path, lang)
 
     chunk_dir = audio_path.parent / "chunks"
-    chunks = split_audio(audio_path, chunk_dir)
+    chunks    = split_audio(audio_path, chunk_dir)
     all_segments: list[dict] = []
     time_offset = 0.0
 
@@ -128,8 +156,8 @@ def transcribe_with_groq(audio_path: Path, lang: str) -> list[dict]:
         for seg in segs:
             all_segments.append({
                 "start": round(seg["start"] + time_offset, 3),
-                "end": round(seg["end"] + time_offset, 3),
-                "text": seg["text"],
+                "end":   round(seg["end"]   + time_offset, 3),
+                "text":  seg["text"],
             })
         time_offset += get_audio_duration(chunk)
 
@@ -137,57 +165,28 @@ def transcribe_with_groq(audio_path: Path, lang: str) -> list[dict]:
     return all_segments
 
 
-def transcribe_with_local_whisper(audio_path: Path, lang: str) -> list[dict]:
-    """
-    Fallback: openai-whisper (pure Python, no C libs needed).
-    Only runs if Groq is down or rate-limited.
-    """
-    try:
-        import whisper
-        model = whisper.load_model("small")
-        result = model.transcribe(str(audio_path), language=lang, verbose=False)
-        return [
-            {
-                "start": seg["start"],
-                "end": seg["end"],
-                "text": seg["text"].strip(),
-            }
-            for seg in result["segments"]
-        ]
-    except ImportError:
-        raise RuntimeError(
-            "Groq is unavailable and no local fallback is installed. "
-            "Please check your GROQ_API_KEY on Render."
-        )
-    except Exception as exc:
-        raise RuntimeError(f"Local whisper fallback failed: {exc}") from exc
-
-
 def transcribe(audio_path: Path, lang: str) -> list[dict]:
-    """Try Groq first; fall back to local whisper."""
     if not GROQ_API_KEY:
-        print("[INFO] No GROQ_API_KEY — using local whisper directly")
-        return transcribe_with_local_whisper(audio_path, lang)
+        raise RuntimeError("No GROQ_API_KEY set. Please add it in Render environment variables.")
     try:
         return transcribe_with_groq(audio_path, lang)
     except Exception as exc:
-        print(f"[WARN] Groq failed ({exc}), falling back to local whisper")
-        return transcribe_with_local_whisper(audio_path, lang)
+        # Re-raise with clear message instead of trying unavailable local fallback
+        raise RuntimeError(
+            f"Groq transcription failed: {exc}\n"
+            "Check your GROQ_API_KEY and Groq usage limits at console.groq.com"
+        ) from exc
 
 
 # ─────────────────────────── translation ────────────────────────
 
 def translate_segments(segments: list[dict], source_lang: str) -> list[dict]:
-    """
-    Translate segment texts → English using Groq + Qwen-QwQ-32b.
-    Processes in batches of 30 to stay within token limits.
-    """
-    client = groq.Groq(api_key=GROQ_API_KEY)
+    client     = get_groq_client()
     BATCH_SIZE = 30
     translated: list[dict] = []
 
     for i in range(0, len(segments), BATCH_SIZE):
-        batch = segments[i: i + BATCH_SIZE]
+        batch   = segments[i: i + BATCH_SIZE]
         numbered = "\n".join(
             f"{j + 1}. {seg['text']}" for j, seg in enumerate(batch)
         )
@@ -205,11 +204,8 @@ def translate_segments(segments: list[dict], source_lang: str) -> list[dict]:
             temperature=0.2,
         )
         raw = response.choices[0].message.content.strip()
-
-        # Strip Qwen's <think>...</think> reasoning blocks
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
 
-        # Parse "N. text" lines
         translated_texts: list[str] = []
         for line in raw.split("\n"):
             line = line.strip()
@@ -220,7 +216,6 @@ def translate_segments(segments: list[dict], source_lang: str) -> list[dict]:
             else:
                 translated_texts.append(line)
 
-        # Pad/trim to exact batch length to stay in sync with timestamps
         while len(translated_texts) < len(batch):
             translated_texts.append(batch[len(translated_texts)]["text"])
         translated_texts = translated_texts[: len(batch)]
@@ -234,7 +229,6 @@ def translate_segments(segments: list[dict], source_lang: str) -> list[dict]:
 # ─────────────────────────── SRT helpers ────────────────────────
 
 def _ts(seconds: float) -> str:
-    """Float seconds → SRT timestamp HH:MM:SS,mmm"""
     ms = int(round((seconds % 1) * 1000))
     s  = int(seconds) % 60
     m  = (int(seconds) // 60) % 60
@@ -257,15 +251,11 @@ def health():
 
 
 @app.post("/upload/init")
-async def upload_init(body: dict):
-    """Create a job directory and return a job_id."""
+async def upload_init(body: InitBody):
     job_id  = uuid.uuid4().hex
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True)
-    meta = {
-        "filename": body.get("filename", "input.mp4"),
-        "total_chunks": body["total_chunks"],
-    }
+    meta = {"filename": body.filename, "total_chunks": body.total_chunks}
     (job_dir / "meta.json").write_text(json.dumps(meta))
     return {"job_id": job_id}
 
@@ -276,7 +266,6 @@ async def upload_chunk(
     chunk_index: int = Form(...),
     chunk: UploadFile = File(...),
 ):
-    """Receive one chunk and save it to the job directory."""
     job_dir = UPLOAD_DIR / job_id
     if not job_dir.exists():
         raise HTTPException(404, "Job not found")
@@ -293,15 +282,11 @@ async def upload_chunk(
 
 
 @app.post("/process")
-async def process_job(body: dict):
-    """Assemble chunks, extract audio, transcribe, translate, return SRT."""
-    job_id   = body.get("job_id")
-    src_lang = body.get("source_language", "english").lower().strip()
-    tgt_lang = body.get("target_language", "english").lower().strip()
-    filename = body.get("filename", "output.mp4")
-
-    if not job_id:
-        raise HTTPException(400, "job_id is required")
+async def process_job(body: ProcessBody):
+    job_id   = body.job_id
+    src_lang = body.source_language.lower().strip()
+    tgt_lang = body.target_language.lower().strip()
+    filename = body.filename
 
     job_dir = UPLOAD_DIR / job_id
     if not job_dir.exists():
