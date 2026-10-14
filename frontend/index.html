@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>SubtitleForge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:        #0d0d0f;
+      --surface:   #16161a;
+      --border:    #2a2a32;
+      --accent:    #7b6cff;
+      --accent-lo: rgba(123,108,255,.12);
+      --text:      #e8e8f0;
+      --muted:     #6b6b7e;
+      --success:   #4ade80;
+      --error:     #f87171;
+      --mono:      'Space Mono', monospace;
+      --sans:      'Space Grotesk', system-ui, sans-serif;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 15px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .shell {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      max-width: 680px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    header {
+      padding: 36px 0 28px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .logo {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: var(--accent);
+      letter-spacing: .08em;
+      margin-bottom: 12px;
+    }
+
+    h1 {
+      font-size: clamp(1.6rem, 4vw, 2.1rem);
+      font-weight: 600;
+      letter-spacing: -.02em;
+      line-height: 1.2;
+    }
+
+    h1 span {
+      color: var(--muted);
+      font-weight: 300;
+    }
+
+    .tagline {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    main { padding: 36px 0 24px; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px;
+    }
+
+    .drop-zone {
+      border: 1.5px dashed var(--border);
+      border-radius: 8px;
+      padding: 40px 24px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+      position: relative;
+    }
+    .drop-zone.drag-over {
+      border-color: var(--accent);
+      background: var(--accent-lo);
+    }
+    .drop-zone input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      width: 100%;
+      height: 100%;
+    }
+    .drop-icon {
+      font-size: 32px;
+      margin-bottom: 12px;
+      display: block;
+    }
+    .drop-label {
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .drop-label strong {
+      color: var(--text);
+      font-weight: 500;
+    }
+    .file-chosen {
+      margin-top: 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--accent);
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 20px;
+    }
+
+    label.field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    label.field span {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: var(--mono);
+      letter-spacing: .04em;
+    }
+    select {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-family: var(--sans);
+      font-size: 14px;
+      appearance: none;
+      cursor: pointer;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b6b7e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      padding-right: 32px;
+      transition: border-color .15s;
+    }
+    select:focus { outline: none; border-color: var(--accent); }
+
+    .btn {
+      margin-top: 24px;
+      width: 100%;
+      padding: 14px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-family: var(--sans);
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity .15s, transform .1s;
+    }
+    .btn:hover:not(:disabled) { opacity: .88; }
+    .btn:active:not(:disabled) { transform: scale(.99); }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+    .status {
+      margin-top: 20px;
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-size: 14px;
+      display: none;
+    }
+    .status.show { display: block; }
+    .status.info  { background: var(--accent-lo); color: var(--accent); }
+    .status.ok    { background: rgba(74,222,128,.1); color: var(--success); }
+    .status.fail  { background: rgba(248,113,113,.1); color: var(--error); }
+
+    .progress-wrap {
+      margin-top: 16px;
+      display: none;
+    }
+    .progress-wrap.show { display: block; }
+    .progress-bar-bg {
+      height: 4px;
+      background: var(--border);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 99px;
+      width: 0%;
+      transition: width .3s ease;
+    }
+    .progress-label {
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      font-family: var(--mono);
+    }
+
+    .download-btn {
+      display: none;
+      margin-top: 16px;
+      width: 100%;
+      padding: 13px;
+      background: transparent;
+      color: var(--success);
+      border: 1.5px solid var(--success);
+      border-radius: 8px;
+      font-family: var(--sans);
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: center;
+      text-decoration: none;
+      transition: background .15s;
+    }
+    .download-btn.show { display: block; }
+    .download-btn:hover { background: rgba(74,222,128,.08); }
+
+    footer {
+      padding: 20px 0;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--muted);
+      font-family: var(--mono);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    @media (max-width: 480px) {
+      .row { grid-template-columns: 1fr; }
+      .card { padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <p class="logo">SUBTITLEFORGE / v1.0</p>
+    <h1>Video to SRT <span>in seconds</span></h1>
+    <p class="tagline">Upload a movie or episode — get a subtitle file. Tamil, Telugu, English.</p>
+  </header>
+
+  <main>
+    <div class="card">
+
+      <div class="drop-zone" id="dropZone">
+        <input type="file" id="fileInput" accept="video/*,audio/*" />
+        <span class="drop-icon">🎬</span>
+        <p class="drop-label"><strong>Drop your video here</strong> or click to browse</p>
+        <p class="drop-label" style="margin-top:4px;font-size:12px;">MP4, MKV, AVI, MOV — up to 2 GB</p>
+        <p class="file-chosen" id="fileName"></p>
+      </div>
+
+      <div class="row">
+        <label class="field">
+          <span>audio language</span>
+          <select id="sourceLang">
+            <option value="english">English</option>
+            <option value="tamil">Tamil</option>
+            <option value="telugu">Telugu</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>subtitle language</span>
+          <select id="targetLang">
+            <option value="english">English</option>
+          </select>
+        </label>
+      </div>
+
+      <button class="btn" id="submitBtn" disabled>Generate subtitles</button>
+
+      <div class="progress-wrap" id="progressWrap">
+        <div class="progress-bar-bg">
+          <div class="progress-bar-fill" id="progressFill"></div>
+        </div>
+        <p class="progress-label" id="progressLabel">Uploading…</p>
+      </div>
+
+      <div class="status" id="statusBox"></div>
+
+      <a class="download-btn" id="downloadBtn">⬇ Download .srt file</a>
+
+    </div>
+  </main>
+
+  <footer>
+    <span>Powered by Groq + Whisper large-v3 + Qwen-QwQ-32b</span>
+    <span id="footerLang">EN</span>
+  </footer>
+</div>
+
+<script>
+  // ── CHANGE THIS to your Render URL ───────────────────────────
+  const API_BASE = "https://YOUR-APP.onrender.com";
+  // ─────────────────────────────────────────────────────────────
+
+  const dropZone     = document.getElementById("dropZone");
+  const fileInput    = document.getElementById("fileInput");
+  const fileName     = document.getElementById("fileName");
+  const submitBtn    = document.getElementById("submitBtn");
+  const statusBox    = document.getElementById("statusBox");
+  const progressWrap = document.getElementById("progressWrap");
+  const progressFill = document.getElementById("progressFill");
+  const progressLabel= document.getElementById("progressLabel");
+  const downloadBtn  = document.getElementById("downloadBtn");
+  const sourceLang   = document.getElementById("sourceLang");
+  const footerLang   = document.getElementById("footerLang");
+
+  let selectedFile = null;
+  let srtBlob      = null;
+  let srtFilename  = "output.srt";
+
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files[0]) selectFile(fileInput.files[0]);
+  });
+
+  dropZone.addEventListener("dragover", e => {
+    e.preventDefault();
+    dropZone.classList.add("drag-over");
+  });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"));
+  dropZone.addEventListener("drop", e => {
+    e.preventDefault();
+    dropZone.classList.remove("drag-over");
+    if (e.dataTransfer.files[0]) selectFile(e.dataTransfer.files[0]);
+  });
+
+  function selectFile(f) {
+    selectedFile = f;
+    const mb = (f.size / 1024 / 1024).toFixed(1);
+    fileName.textContent = `${f.name}  (${mb} MB)`;
+    submitBtn.disabled = false;
+    resetOutput();
+  }
+
+  sourceLang.addEventListener("change", () => {
+    footerLang.textContent = sourceLang.value.slice(0, 2).toUpperCase();
+  });
+
+  submitBtn.addEventListener("click", async () => {
+    if (!selectedFile) return;
+    resetOutput();
+    submitBtn.disabled = true;
+
+    const formData = new FormData();
+    formData.append("file", selectedFile);
+    formData.append("source_language", sourceLang.value);
+    formData.append("target_language", "english");
+
+    showStatus("info", "Uploading video — this may take a while for large files…");
+    progressWrap.classList.add("show");
+    setProgress(0, "Uploading…");
+
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/transcribe`);
+      xhr.responseType = "blob";
+
+      xhr.upload.addEventListener("progress", e => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 60);
+          setProgress(pct, `Uploading… ${pct}%`);
+        }
+      });
+
+      xhr.upload.addEventListener("load", () => {
+        setProgress(65, "Extracting audio…");
+        showStatus("info", "Audio extracted. Transcribing with Whisper…");
+        simulateProgress(65, 95, 90000);
+      });
+
+      xhr.addEventListener("load", () => {
+        clearSimulation();
+        if (xhr.status === 200) {
+          setProgress(100, "Done!");
+          showStatus("ok", "Subtitles generated successfully.");
+          srtBlob = xhr.response;
+          const stem = selectedFile.name.replace(/\.[^.]+$/, "");
+          srtFilename = `${stem}.srt`;
+          downloadBtn.classList.add("show");
+          downloadBtn.textContent = `⬇ Download ${srtFilename}`;
+        } else {
+          const reader = new FileReader();
+          reader.onload = () => {
+            try {
+              const err = JSON.parse(reader.result);
+              showStatus("fail", `Error: ${err.detail || "Something went wrong."}`);
+            } catch {
+              showStatus("fail", `Server error (${xhr.status}).`);
+            }
+          };
+          reader.readAsText(xhr.response);
+          setProgress(0, "");
+          progressWrap.classList.remove("show");
+        }
+        submitBtn.disabled = false;
+      });
+
+      xhr.addEventListener("error", () => {
+        clearSimulation();
+        showStatus("fail", "Network error. Is the backend running?");
+        setProgress(0, "");
+        progressWrap.classList.remove("show");
+        submitBtn.disabled = false;
+      });
+
+      xhr.send(formData);
+
+    } catch (err) {
+      showStatus("fail", `Unexpected error: ${err.message}`);
+      submitBtn.disabled = false;
+    }
+  });
+
+  downloadBtn.addEventListener("click", () => {
+    if (!srtBlob) return;
+    const url = URL.createObjectURL(srtBlob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = srtFilename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  });
+
+  function showStatus(type, msg) {
+    statusBox.className = `status show ${type}`;
+    statusBox.textContent = msg;
+  }
+
+  function setProgress(pct, label) {
+    progressFill.style.width = `${pct}%`;
+    progressLabel.textContent = label;
+  }
+
+  let simTimer = null;
+  function simulateProgress(from, to, durationMs) {
+    const steps = 40;
+    const interval = durationMs / steps;
+    const increment = (to - from) / steps;
+    let current = from;
+    const labels = [
+      "Transcribing speech…",
+      "Processing audio segments…",
+      "Almost there…",
+      "Finalising subtitles…",
+    ];
+    simTimer = setInterval(() => {
+      current = Math.min(current + increment, to);
+      const labelIdx = Math.floor(((current - from) / (to - from)) * labels.length);
+      setProgress(Math.round(current), labels[Math.min(labelIdx, labels.length - 1)]);
+      if (current >= to) clearInterval(simTimer);
+    }, interval);
+  }
+
+  function clearSimulation() {
+    if (simTimer) { clearInterval(simTimer); simTimer = null; }
+  }
+
+  function resetOutput() {
+    statusBox.className = "status";
+    statusBox.textContent = "";
+    downloadBtn.classList.remove("show");
+    progressWrap.classList.remove("show");
+    setProgress(0, "");
+    srtBlob = null;
+  }
+</script>
+</body>
+</html>
