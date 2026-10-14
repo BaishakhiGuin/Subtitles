@@ -185,7 +185,7 @@
       font-size: 14px;
       display: none;
     }
-    .status.show { display: block; }
+    .status.show  { display: block; }
     .status.info  { background: var(--accent-lo); color: var(--accent); }
     .status.ok    { background: rgba(74,222,128,.1); color: var(--success); }
     .status.fail  { background: rgba(248,113,113,.1); color: var(--error); }
@@ -293,7 +293,7 @@
         <div class="progress-bar-bg">
           <div class="progress-bar-fill" id="progressFill"></div>
         </div>
-        <p class="progress-label" id="progressLabel">Uploading…</p>
+        <p class="progress-label" id="progressLabel">Starting…</p>
       </div>
 
       <div class="status" id="statusBox"></div>
@@ -311,29 +311,32 @@
 
 <script>
   // ── CHANGE THIS to your Render URL ───────────────────────────
-  const API_BASE = "https://subtitles-widf.onrender.com/";
+  const API_BASE = "https://YOUR-APP.onrender.com";
   // ─────────────────────────────────────────────────────────────
 
-  const dropZone     = document.getElementById("dropZone");
-  const fileInput    = document.getElementById("fileInput");
-  const fileName     = document.getElementById("fileName");
-  const submitBtn    = document.getElementById("submitBtn");
-  const statusBox    = document.getElementById("statusBox");
-  const progressWrap = document.getElementById("progressWrap");
-  const progressFill = document.getElementById("progressFill");
-  const progressLabel= document.getElementById("progressLabel");
-  const downloadBtn  = document.getElementById("downloadBtn");
-  const sourceLang   = document.getElementById("sourceLang");
-  const footerLang   = document.getElementById("footerLang");
+  const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB per chunk
+
+  const dropZone      = document.getElementById("dropZone");
+  const fileInput     = document.getElementById("fileInput");
+  const fileName      = document.getElementById("fileName");
+  const submitBtn     = document.getElementById("submitBtn");
+  const statusBox     = document.getElementById("statusBox");
+  const progressWrap  = document.getElementById("progressWrap");
+  const progressFill  = document.getElementById("progressFill");
+  const progressLabel = document.getElementById("progressLabel");
+  const downloadBtn   = document.getElementById("downloadBtn");
+  const sourceLang    = document.getElementById("sourceLang");
+  const footerLang    = document.getElementById("footerLang");
 
   let selectedFile = null;
   let srtBlob      = null;
   let srtFilename  = "output.srt";
+  let simTimer     = null;
 
+  // ── file selection ────────────────────────────────────────────
   fileInput.addEventListener("change", () => {
     if (fileInput.files[0]) selectFile(fileInput.files[0]);
   });
-
   dropZone.addEventListener("dragover", e => {
     e.preventDefault();
     dropZone.classList.add("drag-over");
@@ -357,81 +360,102 @@
     footerLang.textContent = sourceLang.value.slice(0, 2).toUpperCase();
   });
 
+  // ── main submit ───────────────────────────────────────────────
   submitBtn.addEventListener("click", async () => {
     if (!selectedFile) return;
     resetOutput();
     submitBtn.disabled = true;
-
-    const formData = new FormData();
-    formData.append("file", selectedFile);
-    formData.append("source_language", sourceLang.value);
-    formData.append("target_language", "english");
-
-    showStatus("info", "Uploading video — this may take a while for large files…");
     progressWrap.classList.add("show");
-    setProgress(0, "Uploading…");
 
     try {
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", `${API_BASE}/transcribe`);
-      xhr.responseType = "blob";
+      // Step 1: upload in chunks
+      const jobId = await uploadInChunks(selectedFile);
 
-      xhr.upload.addEventListener("progress", e => {
-        if (e.lengthComputable) {
-          const pct = Math.round((e.loaded / e.total) * 60);
-          setProgress(pct, `Uploading… ${pct}%`);
-        }
+      // Step 2: process on server
+      showStatus("info", "Transcribing with Whisper — please wait, this takes a few minutes…");
+      simulateProgress(65, 95, 120000);
+
+      const res = await fetch(`${API_BASE}/process`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          job_id: jobId,
+          source_language: sourceLang.value,
+          target_language: "english",
+          filename: selectedFile.name,
+        }),
       });
 
-      xhr.upload.addEventListener("load", () => {
-        setProgress(65, "Extracting audio…");
-        showStatus("info", "Audio extracted. Transcribing with Whisper…");
-        simulateProgress(65, 95, 90000);
-      });
+      clearSimulation();
 
-      xhr.addEventListener("load", () => {
-        clearSimulation();
-        if (xhr.status === 200) {
-          setProgress(100, "Done!");
-          showStatus("ok", "Subtitles generated successfully.");
-          srtBlob = xhr.response;
-          const stem = selectedFile.name.replace(/\.[^.]+$/, "");
-          srtFilename = `${stem}.srt`;
-          downloadBtn.classList.add("show");
-          downloadBtn.textContent = `⬇ Download ${srtFilename}`;
-        } else {
-          const reader = new FileReader();
-          reader.onload = () => {
-            try {
-              const err = JSON.parse(reader.result);
-              showStatus("fail", `Error: ${err.detail || "Something went wrong."}`);
-            } catch {
-              showStatus("fail", `Server error (${xhr.status}).`);
-            }
-          };
-          reader.readAsText(xhr.response);
-          setProgress(0, "");
-          progressWrap.classList.remove("show");
-        }
-        submitBtn.disabled = false;
-      });
-
-      xhr.addEventListener("error", () => {
-        clearSimulation();
-        showStatus("fail", "Network error. Is the backend running?");
-        setProgress(0, "");
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Unknown server error" }));
+        showStatus("fail", `Error: ${err.detail}`);
         progressWrap.classList.remove("show");
         submitBtn.disabled = false;
-      });
+        return;
+      }
 
-      xhr.send(formData);
+      setProgress(100, "Done!");
+      showStatus("ok", "Subtitles generated successfully.");
+
+      srtBlob = await res.blob();
+      const stem = selectedFile.name.replace(/\.[^.]+$/, "");
+      srtFilename = `${stem}.srt`;
+      downloadBtn.classList.add("show");
+      downloadBtn.textContent = `⬇ Download ${srtFilename}`;
 
     } catch (err) {
-      showStatus("fail", `Unexpected error: ${err.message}`);
-      submitBtn.disabled = false;
+      clearSimulation();
+      showStatus("fail", `Error: ${err.message}`);
+      progressWrap.classList.remove("show");
     }
+
+    submitBtn.disabled = false;
   });
 
+  // ── chunked upload ────────────────────────────────────────────
+  async function uploadInChunks(file) {
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    showStatus("info", `Uploading ${totalChunks} part${totalChunks > 1 ? "s" : ""}…`);
+    setProgress(0, "Starting upload…");
+
+    // Init session
+    const initRes = await fetch(`${API_BASE}/upload/init`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: file.name, total_chunks: totalChunks }),
+    });
+    if (!initRes.ok) throw new Error("Failed to start upload session");
+    const { job_id } = await initRes.json();
+
+    // Send chunks sequentially
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end   = Math.min(start + CHUNK_SIZE, file.size);
+      const blob  = file.slice(start, end);
+
+      const form = new FormData();
+      form.append("job_id", job_id);
+      form.append("chunk_index", i);
+      form.append("chunk", blob, file.name);
+
+      const res = await fetch(`${API_BASE}/upload/chunk`, {
+        method: "POST",
+        body: form,
+      });
+      if (!res.ok) throw new Error(`Upload failed at part ${i + 1} of ${totalChunks}`);
+
+      const pct = Math.round(((i + 1) / totalChunks) * 60);
+      setProgress(pct, `Uploading part ${i + 1} of ${totalChunks}… (${pct}%)`);
+    }
+
+    setProgress(62, "Upload complete. Extracting audio…");
+    showStatus("info", "Upload complete. Extracting audio from video…");
+    return job_id;
+  }
+
+  // ── download ──────────────────────────────────────────────────
   downloadBtn.addEventListener("click", () => {
     if (!srtBlob) return;
     const url = URL.createObjectURL(srtBlob);
@@ -442,6 +466,7 @@
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   });
 
+  // ── helpers ───────────────────────────────────────────────────
   function showStatus(type, msg) {
     statusBox.className = `status show ${type}`;
     statusBox.textContent = msg;
@@ -452,22 +477,21 @@
     progressLabel.textContent = label;
   }
 
-  let simTimer = null;
   function simulateProgress(from, to, durationMs) {
-    const steps = 40;
-    const interval = durationMs / steps;
+    const steps     = 40;
+    const interval  = durationMs / steps;
     const increment = (to - from) / steps;
-    let current = from;
-    const labels = [
+    let current     = from;
+    const labels    = [
       "Transcribing speech…",
       "Processing audio segments…",
-      "Almost there…",
-      "Finalising subtitles…",
+      "Translating subtitles…",
+      "Finalising…",
     ];
     simTimer = setInterval(() => {
       current = Math.min(current + increment, to);
-      const labelIdx = Math.floor(((current - from) / (to - from)) * labels.length);
-      setProgress(Math.round(current), labels[Math.min(labelIdx, labels.length - 1)]);
+      const idx = Math.floor(((current - from) / (to - from)) * labels.length);
+      setProgress(Math.round(current), labels[Math.min(idx, labels.length - 1)]);
       if (current >= to) clearInterval(simTimer);
     }, interval);
   }
@@ -483,6 +507,7 @@
     progressWrap.classList.remove("show");
     setProgress(0, "");
     srtBlob = null;
+    clearSimulation();
   }
 </script>
 </body>
