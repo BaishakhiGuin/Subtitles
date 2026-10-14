@@ -137,7 +137,7 @@ def transcribe_with_groq(audio_path: Path, lang: str) -> list[dict]:
     return all_segments
 
 
-def transcribe_with_faster_whisper(audio_path: Path, lang: str) -> list[dict]:
+def transcribe_with_local_whisper(audio_path: Path, lang: str) -> list[dict]:
     """
     Fallback: openai-whisper (pure Python, no C libs needed).
     Only runs if Groq is down or rate-limited.
@@ -167,12 +167,12 @@ def transcribe(audio_path: Path, lang: str) -> list[dict]:
     """Try Groq first; fall back to local whisper."""
     if not GROQ_API_KEY:
         print("[INFO] No GROQ_API_KEY — using local whisper directly")
-        return transcribe_with_faster_whisper(audio_path, lang)
+        return transcribe_with_local_whisper(audio_path, lang)
     try:
         return transcribe_with_groq(audio_path, lang)
     except Exception as exc:
         print(f"[WARN] Groq failed ({exc}), falling back to local whisper")
-        return transcribe_with_faster_whisper(audio_path, lang)
+        return transcribe_with_local_whisper(audio_path, lang)
 
 
 # ─────────────────────────── translation ────────────────────────
@@ -236,9 +236,9 @@ def translate_segments(segments: list[dict], source_lang: str) -> list[dict]:
 def _ts(seconds: float) -> str:
     """Float seconds → SRT timestamp HH:MM:SS,mmm"""
     ms = int(round((seconds % 1) * 1000))
-    s = int(seconds) % 60
-    m = (int(seconds) // 60) % 60
-    h = int(seconds) // 3600
+    s  = int(seconds) % 60
+    m  = (int(seconds) // 60) % 60
+    h  = int(seconds) // 3600
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
@@ -256,58 +256,96 @@ def health():
     return {"status": "ok", "groq_configured": bool(GROQ_API_KEY)}
 
 
-@app.post("/transcribe")
-async def transcribe_endpoint(
-    file: UploadFile = File(...),
-    source_language: str = Form(...),   # "english" | "tamil" | "telugu"
-    target_language: str = Form(...),   # "english" only for now
-):
-    source_language = source_language.lower().strip()
-    target_language = target_language.lower().strip()
-
-    if source_language not in LANGUAGE_CODE_MAP:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported source language '{source_language}'. "
-                   f"Choose from: {', '.join(LANGUAGE_CODE_MAP.keys())}",
-        )
-
-    lang_code = LANGUAGE_CODE_MAP[source_language]
-    job_id = uuid.uuid4().hex
+@app.post("/upload/init")
+async def upload_init(body: dict):
+    """Create a job directory and return a job_id."""
+    job_id  = uuid.uuid4().hex
     job_dir = UPLOAD_DIR / job_id
     job_dir.mkdir(parents=True)
+    meta = {
+        "filename": body.get("filename", "input.mp4"),
+        "total_chunks": body["total_chunks"],
+    }
+    (job_dir / "meta.json").write_text(json.dumps(meta))
+    return {"job_id": job_id}
 
-    suffix = Path(file.filename or "input.mp4").suffix or ".mp4"
+
+@app.post("/upload/chunk")
+async def upload_chunk(
+    job_id: str = Form(...),
+    chunk_index: int = Form(...),
+    chunk: UploadFile = File(...),
+):
+    """Receive one chunk and save it to the job directory."""
+    job_dir = UPLOAD_DIR / job_id
+    if not job_dir.exists():
+        raise HTTPException(404, "Job not found")
+
+    chunk_path = job_dir / f"chunk_{chunk_index:05d}"
+    with open(chunk_path, "wb") as f:
+        while True:
+            data = await chunk.read(1 * 1024 * 1024)
+            if not data:
+                break
+            f.write(data)
+
+    return {"received": chunk_index}
+
+
+@app.post("/process")
+async def process_job(body: dict):
+    """Assemble chunks, extract audio, transcribe, translate, return SRT."""
+    job_id   = body.get("job_id")
+    src_lang = body.get("source_language", "english").lower().strip()
+    tgt_lang = body.get("target_language", "english").lower().strip()
+    filename = body.get("filename", "output.mp4")
+
+    if not job_id:
+        raise HTTPException(400, "job_id is required")
+
+    job_dir = UPLOAD_DIR / job_id
+    if not job_dir.exists():
+        raise HTTPException(404, "Job not found")
+
+    if src_lang not in LANGUAGE_CODE_MAP:
+        raise HTTPException(400, f"Unsupported language: {src_lang}")
+
+    lang_code  = LANGUAGE_CODE_MAP[src_lang]
+    suffix     = Path(filename).suffix or ".mp4"
     video_path = job_dir / f"input{suffix}"
     audio_path = job_dir / "audio.wav"
     srt_path   = job_dir / "output.srt"
 
     try:
-        # 1. Stream upload to disk in 8 MB chunks — handles 2 GB files
+        # 1. Assemble chunks in order
+        chunk_files = sorted(job_dir.glob("chunk_*"))
+        if not chunk_files:
+            raise HTTPException(422, "No chunks received")
+
         with open(video_path, "wb") as out:
-            while True:
-                chunk = await file.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                out.write(chunk)
+            for cf in chunk_files:
+                out.write(cf.read_bytes())
+                cf.unlink()
 
         # 2. Extract audio
         extract_audio(video_path, audio_path)
+        video_path.unlink(missing_ok=True)
 
         # 3. Transcribe
         segments = transcribe(audio_path, lang_code)
+        audio_path.unlink(missing_ok=True)
 
         if not segments:
-            raise HTTPException(status_code=422, detail="No speech detected in the file.")
+            raise HTTPException(422, "No speech detected in the file.")
 
-        # 4. Translate if source != target
-        if source_language != "english" and target_language == "english":
-            segments = translate_segments(segments, source_language)
+        # 4. Translate if needed
+        if src_lang != "english" and tgt_lang == "english":
+            segments = translate_segments(segments, src_lang)
 
         # 5. Write SRT
         srt_path.write_text(segments_to_srt(segments), encoding="utf-8")
 
-        stem = Path(file.filename or "output").stem
+        stem = Path(filename).stem
         return FileResponse(
             path=str(srt_path),
             media_type="text/plain",
@@ -320,12 +358,4 @@ async def transcribe_endpoint(
         raise
     except Exception as exc:
         shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    finally:
-        # Delete heavy files immediately; SRT lingers briefly for FileResponse
-        for p in (video_path, audio_path):
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                pass
+        raise HTTPException(500, str(exc)) from exc
