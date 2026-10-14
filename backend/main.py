@@ -12,6 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import groq
 
+# ─────────────────────────── app setup ──────────────────────────
+
 app = FastAPI(title="SubtitleForge API")
 
 app.add_middleware(
@@ -37,7 +39,10 @@ LANGUAGE_CODE_MAP = {
 }
 
 
+# ─────────────────────────── ffmpeg helpers ──────────────────────
+
 def extract_audio(video_path: Path, audio_path: Path) -> None:
+    """Extract mono 16 kHz WAV — optimal for Whisper."""
     cmd = [
         "ffmpeg", "-y",
         "-i", str(video_path),
@@ -65,6 +70,7 @@ def get_audio_duration(audio_path: Path) -> float:
 
 
 def split_audio(audio_path: Path, chunk_dir: Path, chunk_seconds: int = 600) -> list[Path]:
+    """Split audio into fixed-length WAV chunks."""
     chunk_dir.mkdir(exist_ok=True)
     pattern = str(chunk_dir / "chunk_%04d.wav")
     cmd = [
@@ -79,7 +85,10 @@ def split_audio(audio_path: Path, chunk_dir: Path, chunk_seconds: int = 600) -> 
     return sorted(chunk_dir.glob("chunk_*.wav"))
 
 
+# ─────────────────────────── transcription ──────────────────────
+
 def _groq_transcribe_single(client: groq.Groq, audio_path: Path, lang: str) -> list[dict]:
+    """Transcribe one WAV file via Groq Whisper. File must be < 25 MB."""
     with open(audio_path, "rb") as f:
         response = client.audio.transcriptions.create(
             file=(audio_path.name, f, "audio/wav"),
@@ -89,12 +98,20 @@ def _groq_transcribe_single(client: groq.Groq, audio_path: Path, lang: str) -> l
             timestamp_granularities=["segment"],
         )
     return [
-        {"start": seg.start, "end": seg.end, "text": seg.text.strip()}
+        {
+            "start": seg.start,
+            "end": seg.end,
+            "text": seg.text.strip(),
+        }
         for seg in response.segments
     ]
 
 
 def transcribe_with_groq(audio_path: Path, lang: str) -> list[dict]:
+    """
+    Transcribe audio with Groq Whisper.
+    Auto-chunks if file > 24 MB to stay within Groq's 25 MB limit.
+    """
     client = groq.Groq(api_key=GROQ_API_KEY)
     size_mb = audio_path.stat().st_size / (1024 * 1024)
 
@@ -121,29 +138,50 @@ def transcribe_with_groq(audio_path: Path, lang: str) -> list[dict]:
 
 
 def transcribe_with_faster_whisper(audio_path: Path, lang: str) -> list[dict]:
+    """
+    Fallback: openai-whisper (pure Python, no C libs needed).
+    Only runs if Groq is down or rate-limited.
+    """
     try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel("small", device="cpu", compute_type="int8")
-        segments, _ = model.transcribe(str(audio_path), language=lang)
+        import whisper
+        model = whisper.load_model("small")
+        result = model.transcribe(str(audio_path), language=lang, verbose=False)
         return [
-            {"start": seg.start, "end": seg.end, "text": seg.text.strip()}
-            for seg in segments
+            {
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": seg["text"].strip(),
+            }
+            for seg in result["segments"]
         ]
+    except ImportError:
+        raise RuntimeError(
+            "Groq is unavailable and no local fallback is installed. "
+            "Please check your GROQ_API_KEY on Render."
+        )
     except Exception as exc:
-        raise RuntimeError(f"faster-whisper fallback failed: {exc}") from exc
+        raise RuntimeError(f"Local whisper fallback failed: {exc}") from exc
 
 
 def transcribe(audio_path: Path, lang: str) -> list[dict]:
+    """Try Groq first; fall back to local whisper."""
     if not GROQ_API_KEY:
+        print("[INFO] No GROQ_API_KEY — using local whisper directly")
         return transcribe_with_faster_whisper(audio_path, lang)
     try:
         return transcribe_with_groq(audio_path, lang)
     except Exception as exc:
-        print(f"[WARN] Groq failed ({exc}), falling back to faster-whisper")
+        print(f"[WARN] Groq failed ({exc}), falling back to local whisper")
         return transcribe_with_faster_whisper(audio_path, lang)
 
 
+# ─────────────────────────── translation ────────────────────────
+
 def translate_segments(segments: list[dict], source_lang: str) -> list[dict]:
+    """
+    Translate segment texts → English using Groq + Qwen-QwQ-32b.
+    Processes in batches of 30 to stay within token limits.
+    """
     client = groq.Groq(api_key=GROQ_API_KEY)
     BATCH_SIZE = 30
     translated: list[dict] = []
@@ -167,8 +205,11 @@ def translate_segments(segments: list[dict], source_lang: str) -> list[dict]:
             temperature=0.2,
         )
         raw = response.choices[0].message.content.strip()
+
+        # Strip Qwen's <think>...</think> reasoning blocks
         raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
 
+        # Parse "N. text" lines
         translated_texts: list[str] = []
         for line in raw.split("\n"):
             line = line.strip()
@@ -179,6 +220,7 @@ def translate_segments(segments: list[dict], source_lang: str) -> list[dict]:
             else:
                 translated_texts.append(line)
 
+        # Pad/trim to exact batch length to stay in sync with timestamps
         while len(translated_texts) < len(batch):
             translated_texts.append(batch[len(translated_texts)]["text"])
         translated_texts = translated_texts[: len(batch)]
@@ -189,7 +231,10 @@ def translate_segments(segments: list[dict], source_lang: str) -> list[dict]:
     return translated
 
 
+# ─────────────────────────── SRT helpers ────────────────────────
+
 def _ts(seconds: float) -> str:
+    """Float seconds → SRT timestamp HH:MM:SS,mmm"""
     ms = int(round((seconds % 1) * 1000))
     s = int(seconds) % 60
     m = (int(seconds) // 60) % 60
@@ -204,6 +249,8 @@ def segments_to_srt(segments: list[dict]) -> str:
     return "\n\n".join(blocks) + "\n"
 
 
+# ─────────────────────────── routes ─────────────────────────────
+
 @app.get("/health")
 def health():
     return {"status": "ok", "groq_configured": bool(GROQ_API_KEY)}
@@ -212,8 +259,8 @@ def health():
 @app.post("/transcribe")
 async def transcribe_endpoint(
     file: UploadFile = File(...),
-    source_language: str = Form(...),
-    target_language: str = Form(...),
+    source_language: str = Form(...),   # "english" | "tamil" | "telugu"
+    target_language: str = Form(...),   # "english" only for now
 ):
     source_language = source_language.lower().strip()
     target_language = target_language.lower().strip()
@@ -233,9 +280,10 @@ async def transcribe_endpoint(
     suffix = Path(file.filename or "input.mp4").suffix or ".mp4"
     video_path = job_dir / f"input{suffix}"
     audio_path = job_dir / "audio.wav"
-    srt_path = job_dir / "output.srt"
+    srt_path   = job_dir / "output.srt"
 
     try:
+        # 1. Stream upload to disk in 8 MB chunks — handles 2 GB files
         with open(video_path, "wb") as out:
             while True:
                 chunk = await file.read(8 * 1024 * 1024)
@@ -243,15 +291,20 @@ async def transcribe_endpoint(
                     break
                 out.write(chunk)
 
+        # 2. Extract audio
         extract_audio(video_path, audio_path)
+
+        # 3. Transcribe
         segments = transcribe(audio_path, lang_code)
 
         if not segments:
-            raise HTTPException(status_code=422, detail="No speech detected.")
+            raise HTTPException(status_code=422, detail="No speech detected in the file.")
 
+        # 4. Translate if source != target
         if source_language != "english" and target_language == "english":
             segments = translate_segments(segments, source_language)
 
+        # 5. Write SRT
         srt_path.write_text(segments_to_srt(segments), encoding="utf-8")
 
         stem = Path(file.filename or "output").stem
@@ -270,6 +323,7 @@ async def transcribe_endpoint(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     finally:
+        # Delete heavy files immediately; SRT lingers briefly for FileResponse
         for p in (video_path, audio_path):
             try:
                 p.unlink(missing_ok=True)
