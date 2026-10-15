@@ -18,6 +18,7 @@
       --muted:     #6b6b7e;
       --success:   #4ade80;
       --error:     #f87171;
+      --warn:      #fbbf24;
       --mono:      'Space Mono', monospace;
       --sans:      'Space Grotesk', system-ui, sans-serif;
     }
@@ -63,10 +64,7 @@
       line-height: 1.2;
     }
 
-    h1 span {
-      color: var(--muted);
-      font-weight: 300;
-    }
+    h1 span { color: var(--muted); font-weight: 300; }
 
     .tagline {
       margin-top: 8px;
@@ -104,19 +102,9 @@
       width: 100%;
       height: 100%;
     }
-    .drop-icon {
-      font-size: 32px;
-      margin-bottom: 12px;
-      display: block;
-    }
-    .drop-label {
-      font-size: 14px;
-      color: var(--muted);
-    }
-    .drop-label strong {
-      color: var(--text);
-      font-weight: 500;
-    }
+    .drop-icon { font-size: 32px; margin-bottom: 12px; display: block; }
+    .drop-label { font-size: 14px; color: var(--muted); }
+    .drop-label strong { color: var(--text); font-weight: 500; }
     .file-chosen {
       margin-top: 10px;
       font-family: var(--mono);
@@ -131,11 +119,7 @@
       margin-top: 20px;
     }
 
-    label.field {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
+    label.field { display: flex; flex-direction: column; gap: 6px; }
     label.field span {
       font-size: 12px;
       color: var(--muted);
@@ -189,11 +173,9 @@
     .status.info  { background: var(--accent-lo); color: var(--accent); }
     .status.ok    { background: rgba(74,222,128,.1); color: var(--success); }
     .status.fail  { background: rgba(248,113,113,.1); color: var(--error); }
+    .status.warn  { background: rgba(251,191,36,.1); color: var(--warn); }
 
-    .progress-wrap {
-      margin-top: 16px;
-      display: none;
-    }
+    .progress-wrap { margin-top: 16px; display: none; }
     .progress-wrap.show { display: block; }
     .progress-bar-bg {
       height: 4px;
@@ -206,7 +188,7 @@
       background: var(--accent);
       border-radius: 99px;
       width: 0%;
-      transition: width .3s ease;
+      transition: width .4s ease;
     }
     .progress-label {
       margin-top: 6px;
@@ -256,7 +238,7 @@
   <header>
     <p class="logo">SUBTITLEFORGE / v1.0</p>
     <h1>Video to SRT <span>in seconds</span></h1>
-    <p class="tagline">Upload a movie or episode — get a subtitle file. Tamil, Telugu, English.</p>
+    <p class="tagline">Upload a movie or episode — get a subtitle file.</p>
   </header>
 
   <main>
@@ -277,6 +259,13 @@
             <option value="english">English</option>
             <option value="tamil">Tamil</option>
             <option value="telugu">Telugu</option>
+            <option value="bengali">Bengali</option>
+            <option value="malayalam">Malayalam</option>
+            <option value="kannada">Kannada</option>
+            <option value="korean">Korean</option>
+            <option value="turkish">Turkish</option>
+            <option value="chinese">Chinese</option>
+            <option value="thai">Thai</option>
           </select>
         </label>
         <label class="field">
@@ -304,7 +293,7 @@
   </main>
 
   <footer>
-    <span>Powered by Groq + Whisper large-v3 + Qwen-QwQ-32b</span>
+    <span>Powered by Groq · Whisper large-v3 · Qwen-QwQ-32b</span>
     <span id="footerLang">EN</span>
   </footer>
 </div>
@@ -314,7 +303,9 @@
   const API_BASE = "https://subtitles-widf.onrender.com";
   // ─────────────────────────────────────────────────────────────
 
-  const CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB per chunk
+  const CHUNK_SIZE   = 2 * 1024 * 1024;  // 2 MB — small enough to never timeout
+  const MAX_RETRIES  = 3;                 // retry each chunk up to 3 times
+  const RETRY_DELAY  = 2000;             // wait 2s between retries
 
   const dropZone      = document.getElementById("dropZone");
   const fileInput     = document.getElementById("fileInput");
@@ -332,6 +323,7 @@
   let srtBlob      = null;
   let srtFilename  = "output.srt";
   let simTimer     = null;
+  let abortCtrl    = null;
 
   // ── file selection ────────────────────────────────────────────
   fileInput.addEventListener("change", () => {
@@ -360,20 +352,30 @@
     footerLang.textContent = sourceLang.value.slice(0, 2).toUpperCase();
   });
 
-  // ── main submit ───────────────────────────────────────────────
+  // ── submit ────────────────────────────────────────────────────
   submitBtn.addEventListener("click", async () => {
     if (!selectedFile) return;
     resetOutput();
     submitBtn.disabled = true;
     progressWrap.classList.add("show");
+    abortCtrl = new AbortController();
 
     try {
-      // Step 1: upload in chunks
+      // Wake up Render if sleeping
+      showStatus("info", "Connecting to server…");
+      setProgress(0, "Waking up server…");
+      try {
+        await fetch(`${API_BASE}/health`, {
+          signal: AbortSignal.timeout(35000)
+        });
+      } catch { /* ignore — server may just be slow */ }
+
+      // Upload in chunks
       const jobId = await uploadInChunks(selectedFile);
 
-      // Step 2: process on server
-      showStatus("info", "Transcribing with Whisper — please wait, this takes a few minutes…");
-      simulateProgress(65, 95, 120000);
+      // Process
+      showStatus("info", "Transcribing with Whisper — this takes a few minutes for large files…");
+      simulateProgress(65, 95, 180000); // simulate up to 3 min
 
       const res = await fetch(`${API_BASE}/process`, {
         method: "POST",
@@ -384,6 +386,7 @@
           target_language: "english",
           filename: selectedFile.name,
         }),
+        signal: AbortSignal.timeout(600000), // 10 min timeout for processing
       });
 
       clearSimulation();
@@ -407,17 +410,22 @@
 
     } catch (err) {
       clearSimulation();
-      showStatus("fail", `Error: ${err.message}`);
+      if (err.name === "AbortError" || err.name === "TimeoutError") {
+        showStatus("fail", "Request timed out. The file may be too large or the server is busy. Try again.");
+      } else {
+        showStatus("fail", `Error: ${err.message}`);
+      }
       progressWrap.classList.remove("show");
     }
 
     submitBtn.disabled = false;
   });
 
-  // ── chunked upload ────────────────────────────────────────────
+  // ── chunked upload with retry ─────────────────────────────────
   async function uploadInChunks(file) {
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-    showStatus("info", `Uploading ${totalChunks} part${totalChunks > 1 ? "s" : ""}…`);
+    const totalMB     = (file.size / 1024 / 1024).toFixed(1);
+    showStatus("info", `Uploading ${totalMB} MB in ${totalChunks} parts…`);
     setProgress(0, "Starting upload…");
 
     // Init session
@@ -425,32 +433,53 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filename: file.name, total_chunks: totalChunks }),
+      signal: AbortSignal.timeout(30000),
     });
     if (!initRes.ok) throw new Error("Failed to start upload session");
     const { job_id } = await initRes.json();
 
-    // Send chunks sequentially
+    // Upload each chunk with retry
     for (let i = 0; i < totalChunks; i++) {
       const start = i * CHUNK_SIZE;
       const end   = Math.min(start + CHUNK_SIZE, file.size);
       const blob  = file.slice(start, end);
 
-      const form = new FormData();
-      form.append("job_id", job_id);
-      form.append("chunk_index", i);
-      form.append("chunk", blob, file.name);
+      let lastErr = null;
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        try {
+          if (attempt > 0) {
+            showStatus("warn", `Part ${i + 1} failed, retrying (attempt ${attempt + 1}/${MAX_RETRIES})…`);
+            await sleep(RETRY_DELAY);
+          }
 
-      const res = await fetch(`${API_BASE}/upload/chunk`, {
-        method: "POST",
-        body: form,
-      });
-      if (!res.ok) throw new Error(`Upload failed at part ${i + 1} of ${totalChunks}`);
+          const form = new FormData();
+          form.append("job_id", job_id);
+          form.append("chunk_index", i);
+          form.append("chunk", blob, file.name);
+
+          const res = await fetch(`${API_BASE}/upload/chunk`, {
+            method: "POST",
+            body: form,
+            signal: AbortSignal.timeout(30000), // 30s per 2MB chunk — plenty
+          });
+
+          if (!res.ok) throw new Error(`Server rejected part ${i + 1}`);
+          lastErr = null;
+          break; // success
+
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+
+      if (lastErr) throw new Error(`Upload failed at part ${i + 1} after ${MAX_RETRIES} attempts: ${lastErr.message}`);
 
       const pct = Math.round(((i + 1) / totalChunks) * 60);
       setProgress(pct, `Uploading part ${i + 1} of ${totalChunks}… (${pct}%)`);
+      showStatus("info", `Uploading… ${pct}% (${((i + 1) * CHUNK_SIZE / 1024 / 1024).toFixed(0)} MB of ${totalMB} MB)`);
     }
 
-    setProgress(62, "Upload complete. Extracting audio…");
+    setProgress(63, "Upload complete. Extracting audio…");
     showStatus("info", "Upload complete. Extracting audio from video…");
     return job_id;
   }
@@ -459,8 +488,8 @@
   downloadBtn.addEventListener("click", () => {
     if (!srtBlob) return;
     const url = URL.createObjectURL(srtBlob);
-    const a = document.createElement("a");
-    a.href = url;
+    const a   = document.createElement("a");
+    a.href     = url;
     a.download = srtFilename;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
@@ -477,8 +506,12 @@
     progressLabel.textContent = label;
   }
 
+  function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+  }
+
   function simulateProgress(from, to, durationMs) {
-    const steps     = 40;
+    const steps     = 60;
     const interval  = durationMs / steps;
     const increment = (to - from) / steps;
     let current     = from;
