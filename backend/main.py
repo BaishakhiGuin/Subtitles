@@ -35,9 +35,16 @@ UPLOAD_DIR = Path("/opt/render/project/src/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 LANGUAGE_CODE_MAP = {
-    "english": "en",
-    "tamil": "ta",
-    "telugu": "te",
+    "english":   "en",
+    "tamil":     "ta",
+    "telugu":    "te",
+    "bengali":   "bn",
+    "malayalam": "ml",
+    "kannada":   "kn",
+    "korean":    "ko",
+    "turkish":   "tr",
+    "chinese":   "zh",
+    "thai":      "th",
 }
 
 
@@ -58,6 +65,10 @@ class ProcessBody(BaseModel):
 # ─────────────────────────── groq client ────────────────────────
 
 def get_groq_client() -> groq.Groq:
+    """
+    Always pass an explicit httpx.Client so groq never tries
+    to build one itself with the deprecated 'proxies' argument.
+    """
     return groq.Groq(
         api_key=GROQ_API_KEY,
         http_client=httpx.Client(),
@@ -120,8 +131,7 @@ def _groq_transcribe_single(client: groq.Groq, audio_path: Path, lang: str) -> l
             timestamp_granularities=["segment"],
         )
 
-    # response.segments can be list of dicts OR objects depending on SDK version
-    # handle both safely
+    # Handle both dict and object responses depending on SDK version
     segments = []
     for seg in response.segments:
         if isinstance(seg, dict):
@@ -167,11 +177,12 @@ def transcribe_with_groq(audio_path: Path, lang: str) -> list[dict]:
 
 def transcribe(audio_path: Path, lang: str) -> list[dict]:
     if not GROQ_API_KEY:
-        raise RuntimeError("No GROQ_API_KEY set. Please add it in Render environment variables.")
+        raise RuntimeError(
+            "No GROQ_API_KEY set. Please add it in Render environment variables."
+        )
     try:
         return transcribe_with_groq(audio_path, lang)
     except Exception as exc:
-        # Re-raise with clear message instead of trying unavailable local fallback
         raise RuntimeError(
             f"Groq transcription failed: {exc}\n"
             "Check your GROQ_API_KEY and Groq usage limits at console.groq.com"
@@ -186,7 +197,7 @@ def translate_segments(segments: list[dict], source_lang: str) -> list[dict]:
     translated: list[dict] = []
 
     for i in range(0, len(segments), BATCH_SIZE):
-        batch   = segments[i: i + BATCH_SIZE]
+        batch    = segments[i: i + BATCH_SIZE]
         numbered = "\n".join(
             f"{j + 1}. {seg['text']}" for j, seg in enumerate(batch)
         )
@@ -239,7 +250,9 @@ def _ts(seconds: float) -> str:
 def segments_to_srt(segments: list[dict]) -> str:
     blocks = []
     for i, seg in enumerate(segments, 1):
-        blocks.append(f"{i}\n{_ts(seg['start'])} --> {_ts(seg['end'])}\n{seg['text']}")
+        blocks.append(
+            f"{i}\n{_ts(seg['start'])} --> {_ts(seg['end'])}\n{seg['text']}"
+        )
     return "\n\n".join(blocks) + "\n"
 
 
